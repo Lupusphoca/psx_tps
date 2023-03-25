@@ -1,118 +1,254 @@
 namespace PSX_VerticalSlice
 {
     using UnityEngine;
-    using UnityEngine.InputSystem;
 
     [RequireComponent(typeof(CharacterController))]
-    [RequireComponent(typeof(PlayerInput))]
     public class PlayerController : MonoBehaviour
     {
-//         [Header("Player")]
-//         [Tooltip("Move speed of the character in m/s")]
-//         public float moveSpeed = 2.0f;
+        [Header("Required Components")]
+        [SerializeField] PlayerSettings ps;
+        [SerializeField] PlayerInputValues piv;
 
-//         [Tooltip("Sprint speed of the character in m/s")]
-//         public float sprintSpeed = 5.335f;
+        private void Start()
+        {
+            ps.cinemachineTargetYaw = ps.cinemachineCameraTarget.transform.rotation.eulerAngles.y;
 
-//         [Tooltip("How fast the character turns to face movement direction")]
-//         [Range(0.0f, 0.3f)]
-//         public float RotationSmoothTime = 0.12f;
+            ps.hasAnimator = TryGetComponent(out ps.animator);
 
-//         [Tooltip("Acceleration and deceleration")]
-//         public float SpeedChangeRate = 10.0f;
+            AssignAnimationIDs();
 
-//         public AudioClip LandingAudioClip;
-//         public AudioClip[] FootstepAudioClips;
-//         [Range(0, 1)] public float FootstepAudioVolume = 0.5f;
+            // Reset our timeouts on start
+            ps.jumpTimeoutDelta = ps.jumpTimeout;
+            ps.fallTimeoutDelta = ps.fallTimeout;
+        }
 
-//         [Space(10)]
-//         [Tooltip("The height the player can jump")]
-//         public float JumpHeight = 1.2f;
+        private void Update()
+        {
+            JumpAndGravity();
+            GroundedCheck();
+            Move();
+        }
 
-//         [Tooltip("The character uses its own gravity value. The engine default is -9.81f")]
-//         public float Gravity = -15.0f;
+        private void LateUpdate()
+        {
+            CameraRotation();
+        }
 
-//         [Space(10)]
-//         [Tooltip("Time required to pass before being able to jump again. Set to 0f to instantly jump again")]
-//         public float JumpTimeout = 0.50f;
+        private void AssignAnimationIDs()
+        {
+            ps.animIDSpeed = Animator.StringToHash("Speed");
+            ps.animIDGrounded = Animator.StringToHash("Grounded");
+            ps.animIDJump = Animator.StringToHash("Jump");
+            ps.animIDFreeFall = Animator.StringToHash("FreeFall");
+            ps.animIDMotionSpeed = Animator.StringToHash("MotionSpeed");
+            ps.animIDAim = Animator.StringToHash("Aiming");
+        }
 
-//         [Tooltip("Time required to pass before entering the fall state. Useful for walking down stairs")]
-//         public float FallTimeout = 0.15f;
+        private void GroundedCheck()
+        {
+            // Set sphere position, with offset
+            var spherePosition = new Vector3(transform.position.x, transform.position.y - ps.groundedOffset, transform.position.z);
+            ps.grounded = Physics.CheckSphere(spherePosition, ps.groundedRadius, ps.groundLayers, QueryTriggerInteraction.Ignore);
 
-//         [Header("Player Grounded")]
-//         [Tooltip("If the character is grounded or not. Not part of the CharacterController built in grounded check")]
-//         public bool Grounded = true;
+            // Update animator if using character
+            if (ps.hasAnimator)
+            {
+                ps.animator.SetBool(ps.animIDGrounded, ps.grounded);
+            }
+        }
 
-//         [Tooltip("Useful for rough ground")]
-//         public float GroundedOffset = -0.14f;
+        private void CameraRotation()
+        {
+            // If there is an input and camera position is not fixed
+            if (piv.look.sqrMagnitude >= ps.cameraRotationThreshold && !ps.lockCameraPosition)
+            {
+                //Don't multiply mouse input by Time.deltaTime;
+                var deltaTimeMultiplier = ps.IsCurrentDeviceMouse ? 1.0f : Time.deltaTime;
 
-//         [Tooltip("The radius of the grounded check. Should match the radius of the CharacterController")]
-//         public float GroundedRadius = 0.28f;
+                ps.cinemachineTargetYaw += piv.look.x * deltaTimeMultiplier * ps.Sensitivity;
+                ps.cinemachineTargetPitch += piv.look.y * deltaTimeMultiplier * ps.Sensitivity;
+            }
 
-//         [Tooltip("What layers the character uses as ground")]
-//         public LayerMask GroundLayers;
+            // Clamp our rotations so our values are limited 360 degrees
+            ps.cinemachineTargetYaw = ClampAngle(ps.cinemachineTargetYaw, float.MinValue, float.MaxValue);
+            ps.cinemachineTargetPitch = ClampAngle(ps.cinemachineTargetPitch, ps.bottomClamp, ps.topClamp);
 
-//         [Header("Cinemachine")]
-//         [Tooltip("The follow target set in the Cinemachine Virtual Camera that the camera will follow")]
-//         public GameObject CinemachineCameraTarget;
+            // Cinemachine will follow this target
+            ps.cinemachineCameraTarget.transform.rotation = Quaternion.Euler(ps.cinemachineTargetPitch + ps.cameraAngleOverride, ps.cinemachineTargetYaw, 0.0f);
+        }
 
-//         [Tooltip("How far in degrees can you move the camera up")]
-//         public float TopClamp = 70.0f;
+        private void Move()
+        {
+            // Set target speed based on move speed, sprint speed and if sprint is pressed
+            var targetSpeed = piv.sprint ? ps.sprintSpeed : ps.moveSpeed;
 
-//         [Tooltip("How far in degrees can you move the camera down")]
-//         public float BottomClamp = -30.0f;
+            // A simplistic acceleration and deceleration designed to be easy to remove, replace, or iterate upon
 
-//         [Tooltip("Additional degress to override the camera. Useful for fine tuning camera position when locked")]
-//         public float CameraAngleOverride = 0.0f;
+            // Note: Vector2's == operator uses approximation so is not floating point error prone, and is cheaper than magnitude
+            // If there is no input, set the target speed to 0
+            if (piv.move == Vector2.zero) { targetSpeed = 0.0f; }
 
-//         [Tooltip("For locking the camera position on all axis")]
-//         public bool LockCameraPosition = false;
+            // A reference to the players current horizontal velocity
+            var currentHorizontalSpeed = new Vector3(ps.characterController.velocity.x, 0.0f, ps.characterController.velocity.z).magnitude;
 
-//         // cinemachine
-//         private float _cinemachineTargetYaw;
-//         private float _cinemachineTargetPitch;
+            var speedOffset = 0.1f;
+            var inputMagnitude = piv.analogMovement ? piv.move.magnitude : 1f;
 
-//         // player
-//         private float _speed;
-//         private float _animationBlend;
-//         private float _targetRotation = 0.0f;
-//         private float _rotationVelocity;
-//         private float _verticalVelocity;
-//         private float _terminalVelocity = 53.0f;
+            // Accelerate or decelerate to target speed
+            if (currentHorizontalSpeed < targetSpeed - speedOffset || currentHorizontalSpeed > targetSpeed + speedOffset)
+            {
+                // Creates curved result rather than a linear one giving a more organic speed change
+                // Note T in Lerp is clamped, so we don't need to clamp our speed
+                ps.speed = Mathf.Lerp(currentHorizontalSpeed, targetSpeed * inputMagnitude, Time.deltaTime * ps.speedChangeRate);
 
-//         // timeout deltatime
-//         private float _jumpTimeoutDelta;
-//         private float _fallTimeoutDelta;
+                // Round speed to 3 decimal places
+                ps.speed = Mathf.Round(ps.speed * 1000f) / 1000f;
+            }
+            else
+            {
+                ps.speed = targetSpeed;
+            }
 
-//         // animation IDs
-//         private int _animIDSpeed;
-//         private int _animIDGrounded;
-//         private int _animIDJump;
-//         private int _animIDFreeFall;
-//         private int _animIDMotionSpeed;
+            ps.animationBlend = Mathf.Lerp(ps.animationBlend, targetSpeed, Time.deltaTime * ps.speedChangeRate);
+            if (ps.animationBlend < 0.01f) { ps.animationBlend = 0f; }
 
-// #if ENABLE_INPUT_SYSTEM && STARTER_ASSETS_PACKAGES_CHECKED
-//         private PlayerInput _playerInput;
-// #endif
-//         private Animator _animator;
-//         private CharacterController _controller;
-//         private StarterAssetsInputs _input;
-//         private GameObject _mainCamera;
+            // Normalise input direction
+            var inputDirection = new Vector3(piv.move.x, 0.0f, piv.move.y).normalized;
 
-//         private const float _threshold = 0.01f;
+            // Note: Vector2's != operator uses approximation so is not floating point error prone, and is cheaper than magnitude
+            // If there is a move input rotate player when the player is moving
+            if (piv.move != Vector2.zero)
+            {
+                ps.targetRotation = Mathf.Atan2(inputDirection.x, inputDirection.z) * Mathf.Rad2Deg + ps.mainCamera.transform.eulerAngles.y;
+                var rotation = Mathf.SmoothDampAngle(transform.eulerAngles.y, ps.targetRotation, ref ps.rotationVelocity, ps.rotationSmoothTime);
 
-//         private bool _hasAnimator;
+                if (!piv.aim)
+                {
+                    // Rotate to face input direction relative to camera position
+                    transform.rotation = Quaternion.Euler(0.0f, rotation, 0.0f);
+                }
+            }
 
-//         private bool IsCurrentDeviceMouse
-//         {
-//             get
-//             {
-// #if ENABLE_INPUT_SYSTEM && STARTER_ASSETS_PACKAGES_CHECKED
-//                 return _playerInput.currentControlScheme == "KeyboardMouse";
-// #else
-//                 return false;
-// #endif
-//             }
-//         }
+
+            var targetDirection = Quaternion.Euler(0.0f, ps.targetRotation, 0.0f) * Vector3.forward;
+
+            // Move the player
+            ps.characterController.Move(targetDirection.normalized * (ps.speed * Time.deltaTime) + new Vector3(0.0f, ps.verticalVelocity, 0.0f) * Time.deltaTime);
+
+            // Update animator if using character
+            if (ps.hasAnimator)
+            {
+                ps.animator.SetFloat(ps.animIDSpeed, ps.animationBlend);
+                ps.animator.SetFloat(ps.animIDMotionSpeed, inputMagnitude);
+            }
+        }
+
+        private void JumpAndGravity()
+        {
+            if (ps.grounded)
+            {
+                // Reset the fall timeout timer
+                ps.fallTimeoutDelta = ps.fallTimeout;
+
+                // Update animator if using character
+                if (ps.hasAnimator)
+                {
+                    ps.animator.SetBool(ps.animIDJump, false);
+                    ps.animator.SetBool(ps.animIDFreeFall, false);
+                }
+
+                // Stop our velocity dropping infinitely when grounded
+                if (ps.verticalVelocity < 0.0f)
+                {
+                    ps.verticalVelocity = -2f;
+                }
+
+                // Jump
+                if (piv.jump && ps.jumpTimeoutDelta <= 0.0f)
+                {
+                    // The square root of H * -2 * G = how much velocity needed to reach desired height
+                    ps.verticalVelocity = Mathf.Sqrt(ps.jumpHeight * -2f * ps.gravity);
+
+                    // Update animator if using character
+                    if (ps.hasAnimator)
+                    {
+                        ps.animator.SetBool(ps.animIDJump, true);
+                    }
+                }
+
+                // Jump timeout
+                if (ps.jumpTimeoutDelta >= 0.0f)
+                {
+                    ps.jumpTimeoutDelta -= Time.deltaTime;
+                }
+            }
+            else
+            {
+                // Reset the jump timeout timer
+                ps.jumpTimeoutDelta = ps.jumpTimeout;
+
+                // Fall timeout
+                if (ps.fallTimeoutDelta >= 0.0f)
+                {
+                    ps.fallTimeoutDelta -= Time.deltaTime;
+                }
+                else
+                {
+                    // Update animator if using character
+                    if (ps.hasAnimator)
+                    {
+                        ps.animator.SetBool(ps.animIDFreeFall, true);
+                    }
+                }
+
+                // If we are not grounded, do not jump
+                piv.jump = false;
+            }
+
+            // Apply gravity over time if under terminal (multiply by delta time twice to linearly speed up over time)
+            if (ps.verticalVelocity < ps.terminalVelocity)
+            {
+                ps.verticalVelocity += ps.gravity * Time.deltaTime;
+            }
+        }
+
+        private static float ClampAngle(float lfAngle, float lfMin, float lfMax)
+        {
+            if (lfAngle < -360f) { lfAngle += 360f; }
+            if (lfAngle > 360f) { lfAngle -= 360f; }
+            return Mathf.Clamp(lfAngle, lfMin, lfMax);
+        }
+
+        private void OnDrawGizmosSelected()
+        {
+            var transparentGreen = new Color(0.0f, 1.0f, 0.0f, 0.35f);
+            var transparentRed = new Color(1.0f, 0.0f, 0.0f, 0.35f);
+
+            if (ps.grounded) { Gizmos.color = transparentGreen; }
+            else Gizmos.color = transparentRed;
+
+            // When selected, draw a gizmo in the position of, and matching radius of, the grounded collider
+            Gizmos.DrawSphere(new Vector3(transform.position.x, transform.position.y - ps.groundedOffset, transform.position.z), ps.groundedRadius);
+        }
+
+        private void OnFootstep(AnimationEvent animationEvent)
+        {
+            if (animationEvent.animatorClipInfo.weight > 0.5f)
+            {
+                if (ps.footstepSounds.Length > 0)
+                {
+                    var index = Random.Range(0, ps.footstepSounds.Length);
+                    AudioSource.PlayClipAtPoint(ps.footstepSounds[index], transform.TransformPoint(ps.characterController.center), ps.footstepAudioVolume);
+                }
+            }
+        }
+
+        private void OnLand(AnimationEvent animationEvent)
+        {
+            if (animationEvent.animatorClipInfo.weight > 0.5f)
+            {
+                AudioSource.PlayClipAtPoint(ps.landingSound, transform.TransformPoint(ps.characterController.center), ps.footstepAudioVolume);
+            }
+        }
     }
 }
